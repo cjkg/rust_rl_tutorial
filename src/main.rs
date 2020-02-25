@@ -11,10 +11,14 @@ use rand::Rng;
 const SCREEN_WIDTH: i32 = 80;
 const SCREEN_HEIGHT: i32 = 50;
 
+const PLAYER: usize = 0;
+
 //TODO: Dungeon Generator file
 const ROOM_MAX_SIZE: i32 = 10;
 const ROOM_MIN_SIZE: i32 = 6;
 const MAX_ROOMS: i32 = 30;
+const MAX_ROOM_MONSTERS: i32 = 3;
+
 
 //TODO: Field of view file
 const FOV_ALGO: FovAlgorithm = FovAlgorithm::Permissive0;
@@ -25,13 +29,19 @@ const TORCH_RADIUS: i32 = 10;
 const MAP_WIDTH: i32 = 80;
 const MAP_HEIGHT: i32 = 45;
 
-const COLOR_DARK_WALL: Color = Color { r: 0, g: 0, b: 100, };
-const COLOR_LIGHT_WALL: Color = Color { r: 130, g: 110, b: 50, };
-const COLOR_DARK_GROUND: Color = Color { r: 50, g: 50, b: 150, };
-const COLOR_LIGHT_GROUND: Color = Color { r: 200, g: 180, b: 50, };
+const COLOR_DARK_WALL: Color = Color { r: 34, g: 32, b: 52, };
+const COLOR_LIGHT_WALL: Color = Color { r: 63, g: 63, b: 116, };
+const COLOR_DARK_GROUND: Color = Color { r: 34, g: 32, b: 52, };
+const COLOR_LIGHT_GROUND: Color = Color { r: 63, g: 63, b: 116, };
+
+const BLACK: Color = Color { r: 0, g: 0, b: 0 };
+const GREEN: Color = Color { r: 106, g: 190, b: 48 };
+const YELLOW: Color = Color { r: 251, g: 242, b: 54 };
+const FORE_COLOR_EXPLORED: Color = Color { r: 63, g: 63, b: 116 };
+const FORE_COLOR_VISIBLE: Color = Color { r: 99, g: 155, b: 255};
 
 const CHAR_WALL: char = '#';
-const CHAR_FLOOR: char = '.';
+const CHAR_FLOOR: char = '.'; 
 
 const LIMIT_FPS: i32 = 20; //20 fps max
 
@@ -52,7 +62,7 @@ struct Game {
 struct Tile {
     blocked: bool,
     explored: bool,
-    block_sight: bool    
+    block_sight: bool,
 }
 
 impl Tile {
@@ -116,11 +126,22 @@ struct Object {
     y: i32,
     char: char,
     color: Color,
+    name: String,
+    blocks: bool,
+    alive: bool,
 }
 
 impl Object {
-    pub fn new(x: i32, y: i32, char: char, color: Color) -> Self {
-        Object { x, y, char, color }
+    pub fn new(x: i32, y: i32, char: char, name: &str, color: Color, blocks: bool) -> Self {
+        Object {
+            x: x,
+            y: y,
+            char: char,
+            color: color,
+            name: name.into(),
+            blocks: blocks,
+            alive: false,
+        }
     }
 
     pub fn move_by(&mut self, dx: i32, dy: i32, game: &Game) {
@@ -133,6 +154,15 @@ impl Object {
     pub fn draw(&self, con: &mut dyn Console) {
         con.set_default_foreground(self.color);
         con.put_char(self.x, self.y, self.char, BackgroundFlag::None);
+    }
+
+    pub fn pos(&self) -> (i32, i32) {
+        (self.x, self.y)
+    }
+
+    pub fn set_pos(&mut self, x: i32, y: i32) {
+        self.x = x;
+        self.y = y;
     }
 }
 
@@ -164,7 +194,7 @@ fn create_v_tunnel(y1: i32, y2: i32, x: i32, map: &mut Map) {
 }
 
 //TODO: Map source file
-fn make_map(player: &mut Object) -> Map {
+fn make_map(objects: &mut Vec<Object>) -> Map {
     //fill map with "blocked" tiles
     let mut map = vec![vec![Tile::wall(); MAP_HEIGHT as usize]; MAP_WIDTH as usize];
     
@@ -186,13 +216,13 @@ fn make_map(player: &mut Object) -> Map {
 
         if !failed {
             create_room(new_room, &mut map);
+            place_objects(new_room, objects);
 
             let (new_x, new_y) = new_room.center();
 
             if rooms.is_empty() {
                 //this is the first room
-                player.x = new_x;
-                player.y = new_y;
+                objects[PLAYER].set_pos(new_x, new_y);
             } else {
                 //otherwise, let's dig a tunnel
                 
@@ -216,11 +246,32 @@ fn make_map(player: &mut Object) -> Map {
 
     map
 }
+
+fn place_objects(room: Rect, objects: &mut Vec<Object>) {
+    // choose random number of monsters
+    let num_monsters = rand::thread_rng().gen_range(0, MAX_ROOM_MONSTERS + 1);
+
+    for _ in 0..num_monsters {
+        // choose random spot for this monster
+        let x = rand::thread_rng().gen_range(room.x1 + 1, room.x2);
+        let y = rand::thread_rng().gen_range(room.y1 + 1, room.y2);
+
+        let mut monster = if rand::random::<f32>() < 0.8 {  // 80% chance of getting an orc
+            // create an orc
+            Object::new(x, y, 'o', "orc", GREEN, true)
+        } else {
+            Object::new(x, y, 'T', "troll", GREEN, true)
+        };
+
+        objects.push(monster);
+    }
+}
+
 //TODO: Render functions source file:
 fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recompute: bool) {
     if fov_recompute {
         //recompute FOV if needed (the player moved or something)
-        let player = &objects[0];
+        let player = &objects[PLAYER];
         tcod.fov
             .compute_fov(player.x, player.y, TORCH_RADIUS, FOV_LIGHT_WALLS, FOV_ALGO);
     }
@@ -238,6 +289,14 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
                 (true, true) => COLOR_LIGHT_WALL,
                 (true, false) => COLOR_LIGHT_GROUND,
             };
+            let fore_color = match (visible, wall) {
+                //outside the field of view
+                (false, true) => FORE_COLOR_EXPLORED,
+                (false, false) => FORE_COLOR_EXPLORED,
+                //inside fov:
+                (true, true) => FORE_COLOR_VISIBLE,
+                (true, false) => FORE_COLOR_VISIBLE,
+            };
             let character = match wall {
                 true => CHAR_WALL,
                 false => CHAR_FLOOR,
@@ -249,6 +308,8 @@ fn render_all(tcod: &mut Tcod, game: &mut Game, objects: &[Object], fov_recomput
             if *explored {
                 tcod.con 
                     .set_char_background(x, y, color, BackgroundFlag::Set);
+                tcod.con
+                    .set_char_foreground(x, y, fore_color);
                 tcod.con
                     .set_char(x, y, character);
             }
@@ -317,14 +378,15 @@ fn main() {
                             fov: FovMap::new(MAP_WIDTH, MAP_HEIGHT),
                         };
 
-    let player = Object::new(25, 23, '@', WHITE);
+    let mut player = Object::new(0, 0, '@', "player", YELLOW, true);
+    player.alive = true;
 
-    let npc = Object::new(SCREEN_WIDTH / 2 - 5, SCREEN_HEIGHT / 2, '@', YELLOW);
-
-    let mut objects = [player, npc];
+    //let npc = Object::new(SCREEN_WIDTH / 2 - 5, SCREEN_HEIGHT / 2, '@', "npc", YELLOW, true);
+ 
+    let mut objects = vec![player];
 
     let mut game = Game {
-        map: make_map(&mut objects[0]),
+        map: make_map(&mut objects),
     };
 
     //populate the FOV Map, following the generated map
@@ -347,13 +409,13 @@ fn main() {
         tcod.con.clear();
 
         // render the screen
-        let fov_recompute = previous_player_position != (objects[0].x, objects[0].y);
+        let fov_recompute = previous_player_position != (objects[PLAYER].x, objects[PLAYER].y);
         render_all(&mut tcod, &mut game, &objects, fov_recompute);
 
         tcod.root.flush();
 
         // handle keys and exit game if neededx`
-        let player = &mut objects[0];
+        let player = &mut objects[PLAYER];
         previous_player_position = (player.x, player.y);
         let exit = handle_keys(&mut tcod, &game, player);
         if exit {
